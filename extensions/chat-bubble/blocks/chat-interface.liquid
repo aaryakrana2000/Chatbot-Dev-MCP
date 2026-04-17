@@ -1,0 +1,482 @@
+{{ 'chat.css' | asset_url | stylesheet_tag }}
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<script src="{{ 'voice.js' | asset_url }}" defer></script>
+
+{% comment %} Non-interactive app blocks allow max 6 settings. CSS variables use defaults below. {% endcomment %}
+<style>
+  .shop-ai-chat-container {
+    --shop-ai-bubble-size: 60px;
+    --shop-ai-bubble-color: {{ block.settings.chat_bubble_color | default: '#5046e4' }};
+    --shop-ai-bubble-icon-color: #ffffff;
+    --shop-ai-bubble-radius: 50px;
+    --shop-ai-window-width: 50%;
+    --shop-ai-window-max-height: 650px;
+    --shop-ai-window-bg: #ffffff;
+    --shop-ai-window-radius: 20px;
+    --shop-ai-header-bg: #667eea;
+    --shop-ai-header-text: #ffffff;
+    --shop-ai-header-font-size: 16px;
+    --shop-ai-messages-bg: #f8f9ff;
+    --shop-ai-message-user-bg: #68a6fc;
+    --shop-ai-message-assistant-bg: #667eea;
+    --shop-ai-message-font-size: 14px;
+    --shop-ai-input-bg: #f8f9ff;
+    --shop-ai-input-text: #1f2937;
+    --shop-ai-input-radius: 20px;
+    --shop-ai-send-btn-color: #5046e4;
+    --shop-ai-voice-btn-color: #6b7280;
+    --shop-ai-questions-bg: #f3f4f6;
+    --shop-ai-questions-text: #374151;
+    --shop-ai-product-card-radius: 12px;
+    --shop-ai-font-family: inherit, sans-serif;
+  }
+</style>
+
+<div class="shop-ai-chat-container" style="bottom: 20px; right: 20px;">
+  <div class="shop-ai-chat-bubble" style="background-color: var(--shop-ai-bubble-color) !important; width: var(--shop-ai-bubble-size); height: var(--shop-ai-bubble-size); border-radius: var(--shop-ai-bubble-radius);">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--shop-ai-bubble-icon-color);">
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+    </svg>
+  </div>
+
+  <div class="shop-ai-chat-window" style="max-width: var(--shop-ai-window-width); max-height: var(--shop-ai-window-max-height); background: var(--shop-ai-window-bg); border-radius: var(--shop-ai-window-radius); font-family: var(--shop-ai-font-family);">
+    <div class="shop-ai-chat-header" style="background: var(--shop-ai-header-bg); color: var(--shop-ai-header-text); font-size: var(--shop-ai-header-font-size);">
+      <div class="shop-ai-chat-header-title">{% if block.settings.chat_title != blank %}{{ block.settings.chat_title }}{% else %}{{ 'chat.title' | t }}{% endif %}</div>
+      <div class="shop-ai-chat-header-buttons">
+        <button class="shop-ai-chat-minimize">−</button>
+        <button class="shop-ai-chat-close">✕</button>
+      </div>
+    </div>
+
+    <div class="shop-ai-chat-messages">
+      <!-- Messages will be added here by JavaScript -->
+    </div>
+
+    <!-- Close Confirmation Modal inside chat -->
+    <div id="shop-ai-close-confirmation-modal" class="shop-ai-close-confirmation-modal">
+      <div class="shop-ai-close-modal-content">
+        <h3>Close Chat</h3>
+        <p>Do you want to close this chat? This will clear your conversation history.</p>
+        <div class="shop-ai-close-modal-buttons">
+          <button class="shop-ai-close-modal-no" id="shop-ai-close-modal-no">No</button>
+          <button class="shop-ai-close-modal-yes" id="shop-ai-close-modal-yes">Yes</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="shop-ai-chat-input">
+      <div class="shop-ai-image-preview-container" id="shop-ai-image-preview-container" style="display: none;">
+        <img id="shop-ai-image-preview" class="shop-ai-image-preview" alt="Preview" width="40" height="40">
+        <button class="shop-ai-image-preview-remove" id="shop-ai-image-preview-remove" title="Remove image">×</button>
+      </div>
+      <input type="text" placeholder="{{ 'chat.inputPlaceholder' | t }}">
+      <input type="file" id="shop-ai-image-upload" accept="image/*" style="display: none;">
+      {% comment %}<button class="shop-ai-chat-upload" title="Upload Image for Try On" type="button">
+        <svg class="upload-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+          <polyline points="17 8 12 3 7 8"></polyline> 
+          <line x1="12" y1="3" x2="12" y2="15"></line>
+        </svg>
+      </button>{% endcomment %}
+
+      <button class="shop-ai-chat-voice" title="Voice Input">
+        <svg class="mic-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+          <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+          <line x1="12" y1="19" x2="12" y2="23"></line>
+          <line x1="8" y1="23" x2="16" y2="23"></line>
+        </svg>
+        <span class="listening-indicator"></span>
+      </button>
+      <button class="shop-ai-chat-send">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="22" y1="2" x2="11" y2="13"></line>
+          <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+        </svg>
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- Try On Modal -->
+<div id="shop-ai-try-on-modal" class="shop-ai-try-on-modal">
+  <div class="shop-ai-modal-overlay"></div>
+  <div class="shop-ai-modal-content">
+    <button class="shop-ai-modal-close" id="shop-ai-modal-close">×</button>
+    
+    <div class="shop-ai-modal-header">
+      <h2>Try On Now</h2>
+    </div>
+    
+    <div class="shop-ai-modal-body">
+      <div class="shop-ai-modal-product-info">
+        <img id="shop-ai-modal-product-image" class="shop-ai-modal-product-image" src="" alt="" width="100" height="100">
+        <div class="shop-ai-modal-product-details">
+          <h3 id="shop-ai-modal-product-title"></h3>
+          <p id="shop-ai-modal-product-price"></p>
+        </div>
+      </div>
+      
+      <div class="shop-ai-modal-upload-section">
+        <h4>Upload Your Image</h4>
+        <div class="shop-ai-modal-upload-area" id="shop-ai-modal-upload-area">
+          <input type="file" id="shop-ai-modal-image-upload" accept="image/*" style="display: none;">
+          <button class="shop-ai-modal-upload-button" id="shop-ai-modal-upload-button">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="17 8 12 3 7 8"></polyline>
+              <line x1="12" y1="3" x2="12" y2="15"></line>
+            </svg>
+            <span class="shop-ai-modal-upload-text">Click to upload your image</span>
+          </button>
+          <img id="shop-ai-modal-image-preview" class="shop-ai-modal-image-preview" style="display: none;" alt="Preview" width="400" height="300">
+        </div>
+      </div>
+      
+      <!-- Loading indicator for modal -->
+      <div class="shop-ai-modal-loader" id="shop-ai-modal-loader" style="display: none;">
+        <div class="shop-ai-modal-loader-spinner"></div>
+        <p class="shop-ai-modal-loader-text">Generating try-on image...</p>
+        <p class="shop-ai-modal-loader-subtext">This may take a few moments</p>
+      </div>
+    </div>
+    
+    <div class="shop-ai-modal-footer">
+      <button class="shop-ai-modal-cancel" id="shop-ai-modal-cancel">Cancel</button>
+      <button class="shop-ai-modal-submit" id="shop-ai-modal-submit">Try On</button>
+    </div>
+  </div>
+</div>
+
+<!-- Close Confirmation Modal -->
+<div id="shop-ai-close-confirmation-modal" class="shop-ai-close-confirmation-modal">
+  <div class="shop-ai-close-modal-overlay"></div>
+  <div class="shop-ai-close-modal-content">
+    <h3>Close Chat</h3>
+    <p>Do you want to close this chat? This will clear your conversation history.</p>
+    <div class="shop-ai-close-modal-buttons">
+      <button class="shop-ai-close-modal-no" id="shop-ai-close-modal-no">No</button>
+      <button class="shop-ai-close-modal-yes" id="shop-ai-close-modal-yes">Yes</button>
+    </div>
+  </div>
+</div>
+
+{% assign suggestive_lines = block.settings.suggestive_questions | newline_to_br | split: '<br />' %}
+{% assign q1 = suggestive_lines[0] | strip | default: "" %}
+{% assign q2 = suggestive_lines[1] | strip | default: "" %}
+{% assign q3 = suggestive_lines[2] | strip | default: "" %}
+{% assign q4 = suggestive_lines[3] | strip | default: "" %}
+<!-- Hidden element to store current settings for customizer sync -->
+<div id="shop-chat-config-data" 
+     data-question1="{{ q1 }}"
+     data-question2="{{ q2 }}"
+     data-question3="{{ q3 }}"
+     data-question4="{{ q4 }}"
+     data-max-questions="4"
+     data-shop-domain="{{ shop.permanent_domain }}"
+     style="display: none;"></div>
+
+<script src="{{ 'chat.js' | asset_url }}" defer></script>
+<script>
+  (function() {
+    // Function to get fresh settings from DOM (for customizer)
+    function getFreshSettingsFromDOM() {
+      var configElement = document.getElementById('shop-chat-config-data');
+      if (configElement) {
+        return {
+          question1: configElement.getAttribute('data-question1') || '',
+          question2: configElement.getAttribute('data-question2') || '',
+          question3: configElement.getAttribute('data-question3') || '',
+          question4: configElement.getAttribute('data-question4') || '',
+          maxQuestions: parseInt(configElement.getAttribute('data-max-questions') || '4', 10),
+          shopDomain: configElement.getAttribute('data-shop-domain') || ''
+        };
+      }
+      return null;
+    }
+
+    var questions = [];
+    {% if q1 != blank %}questions.push({{ q1 | json }});{% endif %}
+    {% if q2 != blank %}questions.push({{ q2 | json }});{% endif %}
+    {% if q3 != blank %}questions.push({{ q3 | json }});{% endif %}
+    {% if q4 != blank %}questions.push({{ q4 | json }});{% endif %}
+
+    window.shopChatConfig = {
+      promptType: {{ block.settings.system_prompt | json }},
+      welcomeMessage: {{ block.settings.welcome_message | json }},
+      chatTitle: {% if block.settings.chat_title != blank %}{{ block.settings.chat_title | json }}{% else %}null{% endif %},
+      inputPlaceholder: null,
+      tryOnProvider: "openai",
+      enableTryOn: {{ block.settings.enable_try_on }},
+      suggestiveQuestions: questions,
+      maxSuggestiveQuestions: 4,
+      suggestiveQuestionFields: {
+        question1: {{ q1 | default: "" | json }},
+        question2: {{ q2 | default: "" | json }},
+        question3: {{ q3 | default: "" | json }},
+        question4: {{ q4 | default: "" | json }}
+      },
+      shopDomain: {{ shop.permanent_domain | json }}
+    };
+    window.shopId = {{ shop.id }};
+    {% if product %}
+      sessionStorage.setItem('shopAiCurrentProduct', JSON.stringify({
+        handle: {{ product.handle | json }},
+        title: {{ product.title | json }}
+      }));
+    {% else %}
+      sessionStorage.removeItem('shopAiCurrentProduct');
+    {% endif %}
+
+    // Function to sync questions to database
+    function syncChatConfigToDatabase() {
+      // Check if we're in customizer and get fresh settings from DOM
+      var isCustomizerPreview = (window.Shopify && window.Shopify.designMode) || 
+                                window.location.search.includes('preview_theme_id') ||
+                                window.location.pathname.includes('/editor') ||
+                                document.querySelector('[data-shopify-editor]') !== null;
+
+      var configToSync;
+      
+      if (isCustomizerPreview) {
+        // In customizer, read fresh values from DOM
+        var freshSettings = getFreshSettingsFromDOM();
+        if (!freshSettings || !freshSettings.shopDomain) {
+          return;
+        }
+        configToSync = {
+          shop: freshSettings.shopDomain,
+          suggestiveQuestion1: freshSettings.question1 || null,
+          suggestiveQuestion2: freshSettings.question2 || null,
+          suggestiveQuestion3: freshSettings.question3 || null,
+          suggestiveQuestion4: freshSettings.question4 || null,
+          maxSuggestiveQuestions: freshSettings.maxQuestions || 4
+        };
+        
+        // Also update window.shopChatConfig with fresh values
+        if (window.shopChatConfig) {
+          window.shopChatConfig.suggestiveQuestionFields = {
+            question1: freshSettings.question1 || '',
+            question2: freshSettings.question2 || '',
+            question3: freshSettings.question3 || '',
+            question4: freshSettings.question4 || ''
+          };
+          window.shopChatConfig.maxSuggestiveQuestions = freshSettings.maxQuestions;
+        }
+      } else {
+        // On storefront, use window.shopChatConfig
+        if (!window.shopChatConfig || !window.shopChatConfig.suggestiveQuestionFields || !window.shopChatConfig.shopDomain) {
+          return;
+        }
+        configToSync = {
+          shop: window.shopChatConfig.shopDomain,
+          suggestiveQuestion1: window.shopChatConfig.suggestiveQuestionFields.question1 || null,
+          suggestiveQuestion2: window.shopChatConfig.suggestiveQuestionFields.question2 || null,
+          suggestiveQuestion3: window.shopChatConfig.suggestiveQuestionFields.question3 || null,
+          suggestiveQuestion4: window.shopChatConfig.suggestiveQuestionFields.question4 || null,
+          maxSuggestiveQuestions: window.shopChatConfig.maxSuggestiveQuestions || 4
+        };
+      }
+
+      // Prevent multiple simultaneous syncs
+      if (window.shopChatConfigSyncInProgress) {
+        console.log('Sync already in progress, skipping...');
+        return;
+      }
+
+      window.shopChatConfigSyncInProgress = true;
+
+      // Create an AbortController for timeout
+      var controller = new AbortController();
+      var timeoutId = setTimeout(function() {
+        controller.abort();
+        window.shopChatConfigSyncInProgress = false;
+        console.warn('Sync request timed out');
+      }, 5000); // 5 second timeout
+
+      // Log what we're syncing
+      console.log('[Chat Config] Syncing to database:', {
+        shop: configToSync.shop,
+        questions: [
+          configToSync.suggestiveQuestion1,
+          configToSync.suggestiveQuestion2,
+          configToSync.suggestiveQuestion3,
+          configToSync.suggestiveQuestion4
+        ],
+        max: configToSync.maxSuggestiveQuestions
+      });
+
+      // Make the API call non-blocking with timeout
+      fetch('https://52fe-103-187-96-186.ngrok-free.app/api/sync-chat-config', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(configToSync),
+        keepalive: true,
+        signal: controller.signal
+      }).then(function(response) {
+        clearTimeout(timeoutId);
+        if (response.ok) {
+          return response.json().then(function(data) {
+            console.log('[Chat Config] ✅ Synced successfully to database:', data);
+          });
+        } else {
+          return response.text().then(function(text) {
+            console.warn('[Chat Config] ❌ Failed to sync: HTTP ' + response.status, text);
+          });
+        }
+      }).catch(function(error) {
+        clearTimeout(timeoutId);
+        if (error.name !== 'AbortError') {
+          // console.error('[Chat Config] ❌ Error syncing to database:', error);
+        }
+      }).finally(function() {
+        window.shopChatConfigSyncInProgress = false;
+      });
+    }
+
+    // Check if we're in the customizer preview
+    var isCustomizerPreview = (window.Shopify && window.Shopify.designMode) || 
+                              window.location.search.includes('preview_theme_id') ||
+                              window.location.pathname.includes('/editor') ||
+                              document.querySelector('[data-shopify-editor]') !== null;
+
+    // Sync on page load (only on actual storefront, not in customizer preview)
+    if (!isCustomizerPreview) {
+      syncChatConfigToDatabase();
+    }
+
+    // Listen for Shopify customizer events to sync when settings are saved
+    if (isCustomizerPreview && document.addEventListener) {
+      var lastSyncTime = 0;
+      var MIN_SYNC_INTERVAL = 3000; // Minimum 3 seconds between syncs
+      var syncPending = false;
+      var lastKnownSettings = null;
+      var syncTimeout = null;
+      
+      function getCurrentSettingsString() {
+        var freshSettings = getFreshSettingsFromDOM();
+        if (!freshSettings) return null;
+        return JSON.stringify({
+          q1: freshSettings.question1 || '',
+          q2: freshSettings.question2 || '',
+          q3: freshSettings.question3 || '',
+          q4: freshSettings.question4 || '',
+          max: freshSettings.maxQuestions
+        });
+      }
+
+      // Debounced sync function
+      function debouncedSync() {
+        if (syncTimeout) {
+          clearTimeout(syncTimeout);
+        }
+        
+        syncTimeout = setTimeout(function() {
+          if (window.shopChatConfigSyncInProgress || syncPending) {
+            return;
+          }
+          
+          var now = Date.now();
+          if (now - lastSyncTime < MIN_SYNC_INTERVAL) {
+            return;
+          }
+          
+          lastSyncTime = now;
+          syncPending = true;
+          
+          console.log('[Chat Config] Starting debounced sync...');
+          
+          try {
+            syncChatConfigToDatabase();
+          } finally {
+            syncPending = false;
+          }
+        }, 1000); // 1 second debounce
+      }
+
+      // Listen for section load event
+      document.addEventListener('shopify:section:load', function(event) {
+        console.log('[Chat Config] Section loaded event detected');
+        setTimeout(function() {
+          var currentSettings = getCurrentSettingsString();
+          if (currentSettings !== lastKnownSettings) {
+            console.log('[Chat Config] Settings changed, syncing...');
+            lastKnownSettings = currentSettings;
+            debouncedSync();
+          }
+        }, 500);
+      });
+
+      // Reduced frequency periodic check (every 5 seconds)
+      var settingsCheckInterval = setInterval(function() {
+        if (!isCustomizerPreview) {
+          clearInterval(settingsCheckInterval);
+          return;
+        }
+        
+        var currentSettings = getCurrentSettingsString();
+        if (currentSettings && currentSettings !== lastKnownSettings) {
+          console.log('[Chat Config] Settings changed via periodic check');
+          lastKnownSettings = currentSettings;
+          debouncedSync();
+        }
+      }, 5000);
+
+      // Initialize
+      lastKnownSettings = getCurrentSettingsString();
+    }
+  })();
+</script>
+
+{% schema %}
+{
+  "name": "AI Chat Assistant",
+  "target": "body",
+  "settings": [
+    {
+      "type": "color",
+      "id": "chat_bubble_color",
+      "label": "Bubble color",
+      "default": "#5046e4"
+    },
+    {
+      "type": "text",
+      "id": "chat_title",
+      "label": "Chat title",
+      "default": "Store Assistant",
+      "info": "Leave blank in the field to use the theme translation"
+    },
+    {
+      "type": "text",
+      "id": "welcome_message",
+      "label": "Welcome message",
+      "default": "👋 Hi there! How can I help you today?"
+    },
+    {
+      "type": "select",
+      "id": "system_prompt",
+      "label": "Assistant personality",
+      "options": [
+        { "value": "standardAssistant", "label": "Standard Assistant" }
+      ],
+      "default": "standardAssistant"
+    },
+    {
+      "type": "checkbox",
+      "id": "enable_try_on",
+      "label": "Enable virtual try-on",
+      "default": true,
+      "info": "Show Try-On button on product cards"
+    },
+    {
+      "type": "textarea",
+      "id": "suggestive_questions",
+      "label": "Suggestive questions",
+      "default": "Hello, how are you?\nWhat is this store about?\nHey, please show me some products\nWhat are your best sellers?",
+      "info": "One question per line, max 4 shown"
+    }
+  ]
+}
+{% endschema %}

@@ -295,10 +295,11 @@ function sanitizeSchema(schema) {
 // Category-prefixed lines (e.g. "Shirt: Linen Eyelet Panel Guayabera Shirt (Egret) — $105.00") — match so we can extract product name
 const OUTFIT_CATEGORY_PREFIX = /^\s*(?:Shirt|Pants|Shoes|Top|Bottom|Dress|Jacket|Vest|Accessory|Sneakers|Footwear)\s*:\s*(.+?)\s*[—–-]\s*\$?[\d.,]+/im;
 
-/** Extract product handle from product URL (e.g. .../products/linen-shirt -> linen-shirt) */
+/** Extract product handle from formatted product (API handle or /products/… URL). */
 function getHandleFromProduct(product) {
+  if (product?.handle) return String(product.handle).toLowerCase().trim();
   const url = product?.url || '';
-  const m = url.match(/\/products\/([a-z0-9\-]+)/i);
+  const m = url.match(/\/products\/([a-z0-9][a-z0-9\-]*)/i);
   return m ? m[1].toLowerCase() : '';
 }
 
@@ -311,22 +312,77 @@ function pickProductByHandle(products, handle) {
 
 /**
  * Extract product handles from text. Handles are stable and won't break when wording changes.
- * Sources: /products/{{handle}} in URLs, and explicit [handle: {{handle}}] or handle: {{handle}}.
+ * Sources: /products/{{handle}} or https://…/products/{{handle}} in markdown/links, and explicit handle: lines.
  * @returns {string[]} Unique list of handles (lowercase)
  */
 function extractProductHandlesFromText(text) {
   if (!text || typeof text !== 'string') return [];
   const handles = new Set();
-  const urlHandleRe = /\/products\/([a-z0-9\-]+)/gi;
+  const urlHandleRe = /\/products\/([a-z0-9][a-z0-9\-]*)(?=[\s?#.)'"\],]|$)/gi;
   let match;
   while ((match = urlHandleRe.exec(text)) !== null) {
     handles.add(match[1].toLowerCase());
   }
-  const explicitRe = /\[?handle\s*:\s*([a-z0-9\-]+)\]?/gi;
+  const explicitRe = /\[?handle\s*:\s*([a-z0-9][a-z0-9\-]*)\]?/gi;
   while ((match = explicitRe.exec(text)) !== null) {
     handles.add(match[1].toLowerCase());
   }
   return [...handles];
+}
+
+/**
+ * Walk OpenAI Responses `full_response` and collect unique products from every completed search_catalog MCP call.
+ * Same payload the model saw — avoids fragile title/price line parsing for cards.
+ */
+function collectRawCatalogProductsFromOpenAiResponse(fullResponse) {
+  if (!fullResponse || typeof fullResponse !== 'object') return [];
+  const byId = new Map();
+  const stack = [fullResponse];
+  while (stack.length) {
+    const obj = stack.pop();
+    if (!obj || typeof obj !== 'object') continue;
+    if (Array.isArray(obj)) {
+      for (const x of obj) stack.push(x);
+      continue;
+    }
+    const done =
+      obj.status === 'completed' ||
+      obj.status === 'succeeded' ||
+      obj.state === 'completed';
+    const isSearchCatalog =
+      obj.name === 'search_catalog' ||
+      (obj.tool_name === 'search_catalog');
+    if (done && isSearchCatalog && obj.output != null) {
+      try {
+        const parsed = typeof obj.output === 'string' ? JSON.parse(obj.output) : obj.output;
+        const arr = parsed?.products;
+        if (Array.isArray(arr)) {
+          for (const p of arr) {
+            const id = p?.id;
+            if (id) byId.set(id, p);
+          }
+        }
+      } catch {
+        /* ignore malformed tool output */
+      }
+    }
+    for (const v of Object.values(obj)) {
+      if (v && typeof v === 'object') stack.push(v);
+    }
+  }
+  return [...byId.values()];
+}
+
+/** Add storefront PDP URLs when we have Origin + handle but no url yet. */
+function enrichProductStorefrontUrls(products, storeOrigin) {
+  if (!storeOrigin || !Array.isArray(products)) return products;
+  const base = String(storeOrigin).replace(/\/$/, '');
+  return products.map((p) => {
+    if (!p || (p.url && String(p.url).trim())) return p;
+    const h = p.handle || getHandleFromProduct(p);
+    if (!h) return p;
+    return { ...p, url: `${base}/products/${encodeURIComponent(h)}` };
+  });
 }
 
 /**
@@ -345,6 +401,8 @@ function extractProductIdentifiers(text) {
 const PRODUCT_NAME_PATTERNS = [
   // Outfit-style "Shirt: Product Name (Variant) — $price" / "Pants: ..." / "Shoes: ..." — so cards match LLM message
   /^(?:Shirt|Pants|Shoes|Top|Bottom|Dress|Jacket|Vest|Accessory|Sneakers|Footwear)\s*:\s*.+?\s*[—–-]\s*\$?[\d.,]+(?:\s*\([^)]*\))?\s*$/gim,
+  // Plain catalog lines: title — $low or title — $low–$high (em/en dash before $; titles may start with digits or "Big & …")
+  /^\s*(?:[-*]\s*)?.+\s+[\u2014\u2013]\s+\$[\d.,]+(?:[-\u2013\u2014]\s*\$[\d.,]+)?\s*$/gim,
   // Link format with optional bold price: [Name](url) - $price or **$price**
   /\*\*([^*]+)\*\*\s*[—-]\s*\*\*[₹$£€¥₩₽¢₡₪₦₨₫₴₵₸₺﷼₼₾₿¤][\d.,]+\*\*/g,
   /\[([^\]]+)\]\([^)]+\)\s*[—-]\s*\*\*\$?[\d.,]+(?:[\s-–—]+\$?[\d.,]+)?\*\*/g,
@@ -362,48 +420,61 @@ const PRODUCT_NAME_PATTERNS = [
   /^\s*[-*]\s*[^\n?]+$/gm
 ];
 
-function extractProductNamesFromText(text) {
-  let allMatches = [];
-  for (const pattern of PRODUCT_NAME_PATTERNS) {
-    const matches = text.match(pattern);
-    if (matches && matches.length > 0) {
-      allMatches = matches;
-      break;
-    }
+/** Strip trailing " — $x" or " — $x–$y" (Unicode or ASCII dash between prices) from a single-line catalog row. */
+const LIST_LINE_PRICE_TAIL =
+  /\s+[\u2014\u2013]\s+\$[\d.,]+(?:[-\u2013\u2014]\s*\$[\d.,]+)?\s*$/;
+
+function extractProductNameFromMatchLine(match) {
+  let name = null;
+  const trimmed = String(match).trim();
+  // Plain "Title — $3,900.00–$7,900.00" rows (pattern index 1) — must use em/en dash before $, not hyphens inside the title
+  if (LIST_LINE_PRICE_TAIL.test(trimmed)) {
+    name = trimmed.replace(/^\s*(?:[-*]\s*)?/, '').replace(LIST_LINE_PRICE_TAIL, '').trim();
+    if (name) return name.replace(/^[-*]\s*/, '').trim();
   }
-  const productNames = allMatches.map(match => {
-    let name = null;
-    // Outfit-style "Shirt: Product Name (Variant) — $105.00"
-    const categoryMatch = match.match(OUTFIT_CATEGORY_PREFIX);
-    if (categoryMatch) name = categoryMatch[1];
+  // Outfit-style "Shirt: Product Name (Variant) — $105.00"
+  const categoryMatch = trimmed.match(OUTFIT_CATEGORY_PREFIX);
+  if (categoryMatch) name = categoryMatch[1];
+  else {
+    const linkMatch = trimmed.match(/\*\*\[([^\]]+)\]/);
+    if (linkMatch) name = linkMatch[1];
     else {
-      const linkMatch = match.match(/\*\*\[([^\]]+)\]/);
-      if (linkMatch) name = linkMatch[1];
+      const boldMatch = trimmed.match(/\*\*([^*]+)\*\*/);
+      if (boldMatch) name = boldMatch[1];
       else {
-        const boldMatch = match.match(/\*\*([^*]+)\*\*/);
-        if (boldMatch) name = boldMatch[1];
+        const plainLinkMatch = trimmed.match(/\[([^\]]+)\]\([^)]+\)/);
+        if (plainLinkMatch) name = plainLinkMatch[1];
         else {
-          const plainLinkMatch = match.match(/\[([^\]]+)\]\([^)]+\)/);
-          if (plainLinkMatch) name = plainLinkMatch[1];
+          const nameMatch = trimmed.match(/([^—-]+?)\s*[—-]/);
+          if (nameMatch) name = nameMatch[1];
           else {
-            const nameMatch = match.match(/([^—-]+?)\s*[—-]/);
-            if (nameMatch) name = nameMatch[1];
-            else {
-              const bulletOnly = match.replace(/^\s*[-*]\s*/, '').trim();
-              if (bulletOnly.length >= 15) name = bulletOnly.replace(/\s*[–-]\s*[A-Z]{2}\d+\s*$/, '').trim();
-            }
+            const bulletOnly = trimmed.replace(/^\s*[-*]\s*/, '').trim();
+            if (bulletOnly.length >= 15) name = bulletOnly.replace(/\s*[–-]\s*[A-Z]{2}\d+\s*$/, '').trim();
           }
         }
       }
     }
-    return name ? name.trim().replace(/^[-*]\s*/, '') : null;
-  }).filter(Boolean);
+  }
+  return name ? name.trim().replace(/^[-*]\s*/, '') : null;
+}
+
+function extractProductNamesFromText(text) {
   const suggestionStarts = /^(show me|what's|what is|do you|tell me|i need|add |proceed|can you|want me|how can|any |is there)/i;
-  return [...new Set(productNames)].filter(name =>
+  const isGoodName = (name) =>
     name.length > 2 &&
     !name.match(/^\$?[\d.,]+$/) &&
-    !suggestionStarts.test(name.trim())
-  );
+    !suggestionStarts.test(name.trim()) &&
+    !name.trim().endsWith('?');
+
+  let bestNames = [];
+  for (const pattern of PRODUCT_NAME_PATTERNS) {
+    const matches = text.match(pattern);
+    if (!matches || matches.length === 0) continue;
+    const productNames = matches.map(extractProductNameFromMatchLine).filter(Boolean);
+    const filtered = [...new Set(productNames)].filter(isGoodName);
+    if (filtered.length > bestNames.length) bestNames = filtered;
+  }
+  return bestNames;
 }
 
 /**
@@ -458,6 +529,38 @@ function pickBestMatchForProductName(products, requestedName) {
     }
   }
   return best;
+}
+
+/**
+ * Payload for storefront MCP `search_catalog` (UCP): nested `catalog`, structured `context`, `pagination`.
+ * Matches the shape OpenAI's Shopify MCP connector sends; required for correct catalog results.
+ */
+function buildSearchCatalogToolArguments(query, shopContext, intent, paginationLimit = 15) {
+  const limit = Math.min(Math.max(1, paginationLimit), 50);
+  const context = {
+    language: shopContext?.language || 'en',
+    currency: shopContext?.currency || 'USD',
+    intent: intent || 'Product search',
+  };
+  if (shopContext?.country) context.address_country = shopContext.country;
+  if (shopContext?.region) context.address_region = shopContext.region;
+  if (shopContext?.postal_code) context.postal_code = shopContext.postal_code;
+
+  return {
+    catalog: {
+      query: String(query || '').trim(),
+      context,
+      pagination: { cursor: '', limit },
+    },
+  };
+}
+
+/** Lightweight intent gate for direct fallback catalog search when model MCP args return empty unexpectedly. */
+function isLikelyProductBrowseIntent(text) {
+  const t = String(text || '').toLowerCase();
+  if (!t.trim()) return false;
+  if (/\b(cart|checkout|policy|return|refund|shipping|faq|contact|order status)\b/.test(t)) return false;
+  return /\b(show|find|search|looking|browse|recommend|suggest|products?|catalog|clothes?|shirts?|pants?|shoes?|dress|jacket|women|men|womens|mens|category)\b/.test(t);
 }
 
 /**
@@ -611,10 +714,12 @@ async function handleChatSession({ request, userMessage, conversationId, cartId,
               const sectionProducts = [];
               for (const { type, value } of identifiers) {
                 try {
-                  const toolArguments = {
-                    query: value,
-                    context: `country:${shopContext.country},language:${shopContext.language},currency:${shopContext.currency}`
-                  };
+                  const toolArguments = buildSearchCatalogToolArguments(
+                    value,
+                    shopContext,
+                    `Match product for chat card: ${value}`,
+                    AppConfig.tools.maxProductsToDisplay
+                  );
                   const toolResponse = await mcpClient.callTool('search_catalog', toolArguments);
                   const tempProducts = [];
                   await toolService.handleToolSuccess(toolResponse, 'search_catalog', 'openai-product-search', [], tempProducts, conversationId, () => {}, cartId, shopContext, value);
@@ -628,9 +733,35 @@ async function handleChatSession({ request, userMessage, conversationId, cartId,
                 }
               }
               const uniqueSection = sectionProducts.filter((p, i, self) => self.findIndex(x => x.id === p.id) === i).slice(0, maxProducts);
-              if (uniqueSection.length > 0) sectionsWithProducts.push({ label, products: uniqueSection });
+              const enrichedSection = enrichProductStorefrontUrls(uniqueSection, shopDomain);
+              if (enrichedSection.length > 0) sectionsWithProducts.push({ label, products: enrichedSection });
             }
             return sectionsWithProducts.length > 0 ? { sections: sectionsWithProducts } : [];
+          }
+
+          // Prefer products from completed search_catalog calls inside the OpenAI response (same JSON the model saw).
+          // Stable IDs, images, and prices — no regex on assistant prose. Falls back to handles in text, then name patterns.
+          if (!outfitSections || outfitSections.length === 0) {
+            const rawCatalog = collectRawCatalogProductsFromOpenAiResponse(openaiResponse.full_response);
+            if (rawCatalog.length > 0) {
+              const fakeToolResponse = { content: [{ text: JSON.stringify({ products: rawCatalog }) }] };
+              let formatted = toolService.processProductSearchResult(fakeToolResponse, shopContext);
+              formatted = toolService.applyPriceFiltering(formatted, userMessage);
+              let cap = AppConfig.tools.maxProductsToDisplay;
+              if (productLimit && productLimit > 0) cap = Math.min(cap, productLimit);
+              formatted = formatted.slice(0, cap);
+              formatted = enrichProductStorefrontUrls(formatted, shopDomain);
+              if (formatted.length > 0) {
+                chatLog(conversationId, "productFetchPromise", "Using search_catalog MCP output from OpenAI response", {
+                  rawCount: rawCatalog.length,
+                  cardCount: formatted.length,
+                });
+                return formatted;
+              }
+              chatLog(conversationId, "productFetchPromise", "Catalog from MCP empty after format/filter; falling back to text extraction", {
+                rawCount: rawCatalog.length,
+              });
+            }
           }
 
           const identifiers = extractProductIdentifiers(textContent);
@@ -639,10 +770,12 @@ async function handleChatSession({ request, userMessage, conversationId, cartId,
             const allProducts = [];
             for (const { type, value } of identifiers) {
               try {
-                const toolArguments = {
-                  query: value,
-                  context: `country:${shopContext.country},language:${shopContext.language},currency:${shopContext.currency}`
-                };
+                const toolArguments = buildSearchCatalogToolArguments(
+                  value,
+                  shopContext,
+                  `Match product for chat card: ${value}`,
+                  AppConfig.tools.maxProductsToDisplay
+                );
                 const toolResponse = await mcpClient.callTool('search_catalog', toolArguments);
                 const tempProducts = [];
                 await toolService.handleToolSuccess(toolResponse, 'search_catalog', 'openai-product-search', [], tempProducts, conversationId, () => {}, cartId, shopContext, value);
@@ -655,7 +788,42 @@ async function handleChatSession({ request, userMessage, conversationId, cartId,
                 chatLog(conversationId, "productFetchPromise", "Error fetching product data", { type, value, error: error?.message });
               }
             }
-            return allProducts;
+            return enrichProductStorefrontUrls(allProducts, shopDomain);
+          }
+
+          // Final safety net: if model-side MCP returned empty (often due restrictive args), run one direct catalog search.
+          if (isLikelyProductBrowseIntent(userMessage || textContent)) {
+            try {
+              const fallbackArgs = buildSearchCatalogToolArguments(
+                userMessage || textContent,
+                shopContext,
+                `Fallback browse search for user query: ${String(userMessage || '').slice(0, 80)}`,
+                AppConfig.tools.maxProductsToDisplay
+              );
+              const fallbackResponse = await mcpClient.callTool('search_catalog', fallbackArgs);
+              const fallbackProducts = [];
+              await toolService.handleToolSuccess(
+                fallbackResponse,
+                'search_catalog',
+                'openai-product-search',
+                [],
+                fallbackProducts,
+                conversationId,
+                () => {},
+                cartId,
+                shopContext,
+                userMessage
+              );
+              const enriched = enrichProductStorefrontUrls(fallbackProducts, shopDomain);
+              if (enriched.length > 0) {
+                chatLog(conversationId, "productFetchPromise", "Direct fallback search returned products", {
+                  count: enriched.length,
+                });
+                return enriched;
+              }
+            } catch (error) {
+              chatLog(conversationId, "productFetchPromise", "Direct fallback search failed", { error: error?.message });
+            }
           }
         }
         return [];

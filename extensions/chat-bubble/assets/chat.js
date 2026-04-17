@@ -449,7 +449,7 @@
         // Add a header for the product results
         const header = document.createElement('div');
         header.classList.add('shop-ai-product-header');
-        header.innerHTML = `<h4>${headerText}</h4>`;
+        // header.innerHTML = `<h4>${headerText}</h4>`;
         productSection.appendChild(header);
 
         // Create the product grid container
@@ -1939,6 +1939,10 @@
       formatPrice: function(price) {
         if (price === undefined || price === null) return '';
         const str = String(price).trim();
+        // Server (tool.server) already sends major units with 2 decimals, e.g. "USD 7100.00".
+        // Do not run the legacy "integer >= 1000 => cents" heuristic on those or we show 71.00 instead of 7100.00.
+        if (/^from\s+[A-Z]{3}\s+[\d,]+\.\d{2}$/i.test(str)) return str;
+        if (/^[A-Z]{3}\s+[\d,]+\.\d{2}$/.test(str)) return str;
         const currencyMatch = str.match(/^([A-Z]{3})\s+(.+)$/);
         const currency = currencyMatch ? currencyMatch[1] : '';
         const numStr = currencyMatch ? currencyMatch[2] : str;

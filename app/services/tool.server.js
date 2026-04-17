@@ -521,14 +521,67 @@ export function createToolService() {
    * @param {Object} shopContext - Shop context with currency info
    * @returns {Object} Formatted product data
    */
-  /** Normalize price to dollars for display (catalog may return cents, e.g. 5599 for $55.99) */
-  const toDisplayPrice = (raw, currency = 'USD') => {
-    if (raw === undefined || raw === null) return null;
-    const num = typeof raw === 'string' ? parseFloat(String(raw).replace(/[^0-9.]/g, '')) : Number(raw);
-    if (Number.isNaN(num)) return `${currency} ${String(raw)}`;
-    const isLikelyCents = Number.isInteger(num) && num >= 1000;
-    const dollars = isLikelyCents ? (num / 100).toFixed(2) : (Number(num).toFixed(2));
-    return `${currency} ${dollars}`;
+  /**
+   * Shopify / UCP catalog money: `{ amount, currency }` uses minor units (cents) for USD.
+   * Legacy catalog used bare numbers or `price_range.currency` + numeric `min`.
+   */
+  const normalizeMoneyValue = (value, fallbackCurrency = 'USD') => {
+    if (value === undefined || value === null) return null;
+    if (typeof value === 'object' && value !== null && value.amount != null) {
+      const amt = Number(value.amount);
+      if (Number.isNaN(amt)) return null;
+      return { amount: amt, currency: value.currency || fallbackCurrency, minorUnits: true };
+    }
+    const curr = fallbackCurrency;
+    if (typeof value === 'number' && !Number.isNaN(value)) {
+      return { amount: value, currency: curr, minorUnits: null };
+    }
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      const m = trimmed.match(/^([A-Z]{3})\s+(.+)$/);
+      if (m) {
+        const num = parseFloat(m[2].replace(/,/g, ''));
+        if (!Number.isNaN(num)) return { amount: num, currency: m[1], minorUnits: null };
+      }
+      const num = parseFloat(trimmed.replace(/[^0-9.]/g, ''));
+      if (!Number.isNaN(num)) return { amount: num, currency: curr, minorUnits: null };
+    }
+    return null;
+  };
+
+  /** Display amount as `USD 7,100.00` (Shopify Money uses minor units; legacy ints >= 1000 treated as cents). */
+  const toDisplayPrice = (amount, currency = 'USD', minorUnits = null) => {
+    if (amount === undefined || amount === null) return null;
+    const num = typeof amount === 'string' ? parseFloat(String(amount).replace(/[^0-9.-]/g, '')) : Number(amount);
+    if (Number.isNaN(num)) return `${currency} ${String(amount)}`;
+    const useMinor =
+      minorUnits === true ||
+      (minorUnits !== false && Number.isInteger(num) && Math.abs(num) >= 1000);
+    const dollarsNum = useMinor ? num / 100 : Number(num);
+    if (Number.isNaN(dollarsNum)) return `${currency} ${String(amount)}`;
+    const formatted = new Intl.NumberFormat('en-US', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(dollarsNum);
+    return `${currency} ${formatted}`;
+  };
+
+  const firstCatalogImageUrl = (product) => {
+    if (product.image_url) return product.image_url;
+    const fromMedia = (media) => {
+      if (!Array.isArray(media)) return '';
+      const item = media.find((m) => m && (m.type === 'image' || !m.type) && (m.url || m.src));
+      return item?.url || item?.src || '';
+    };
+    let url = fromMedia(product.media);
+    if (url) return url;
+    if (Array.isArray(product.variants)) {
+      for (const v of product.variants) {
+        url = fromMedia(v.media);
+        if (url) return url;
+      }
+    }
+    return '';
   };
 
   const formatProductData = (product, shopContext) => {
@@ -538,10 +591,15 @@ export function createToolService() {
     const currency = shopContext?.currency || 'USD';
     
     if (product.price_range) {
-      const curr = product.price_range.currency || currency;
-      const raw = product.price_range.min;
-      toolLog(null, "formatProductData", "Using price_range", { currency: curr, price: raw });
-      price = toDisplayPrice(raw, curr) || `${curr} ${raw}`;
+      const minM = normalizeMoneyValue(product.price_range.min, currency);
+      const maxM = normalizeMoneyValue(product.price_range.max, currency);
+      toolLog(null, "formatProductData", "Using price_range", { min: product.price_range.min, max: product.price_range.max });
+      if (minM && maxM && minM.amount !== maxM.amount) {
+        const lo = toDisplayPrice(minM.amount, minM.currency, minM.minorUnits);
+        price = lo ? `from ${lo}` : 'Price not available';
+      } else if (minM) {
+        price = toDisplayPrice(minM.amount, minM.currency, minM.minorUnits) || 'Price not available';
+      }
     } else if (product.variants && product.variants.length > 0) {
       const variant = product.variants[0];
       const curr = variant.currency || currency;
@@ -549,9 +607,12 @@ export function createToolService() {
       toolLog(null, "formatProductData", "Using variant", { currency: curr, rawPrice: priceValue });
       if (typeof priceValue === 'string' && /^[A-Z]{3}\s/.test(priceValue)) {
         const numPart = parseFloat(priceValue.replace(/^[A-Z]{3}\s*/, ''));
-        price = Number.isNaN(numPart) ? priceValue : toDisplayPrice(numPart, priceValue.slice(0, 3)) || priceValue;
+        price = Number.isNaN(numPart) ? priceValue : toDisplayPrice(numPart, priceValue.slice(0, 3), false) || priceValue;
       } else {
-        price = toDisplayPrice(priceValue, curr) || `${curr} ${priceValue}`;
+        const vm = normalizeMoneyValue(priceValue, curr);
+        price = vm
+          ? toDisplayPrice(vm.amount, vm.currency, vm.minorUnits) || `${curr} ${priceValue}`
+          : toDisplayPrice(priceValue, curr, false) || `${curr} ${priceValue}`;
       }
     }
     
@@ -561,14 +622,32 @@ export function createToolService() {
     const variantId = product.variants && product.variants.length > 0 
       ? product.variants[0].id 
       : null;
+
+    const description =
+      typeof product.description === 'object' && product.description !== null && product.description.html != null
+        ? String(product.description.html)
+        : (product.description || '');
+
+    const imageUrl = firstCatalogImageUrl(product);
+
+    const url =
+      product.url || product.online_store_url || product.onlineStoreUrl || product.product_url || '';
+    const handleRaw =
+      product.handle ||
+      product.product_handle ||
+      product.slug ||
+      (typeof url === 'string' ? (url.match(/\/products\/([a-z0-9][a-z0-9\-]*)/i) || [])[1] : '') ||
+      '';
+    const handle = handleRaw ? String(handleRaw).toLowerCase().trim() : '';
     
     return {
-      id: product.product_id || `product-${Math.random().toString(36).substring(7)}`,
+      id: product.id || product.product_id || `product-${Math.random().toString(36).substring(7)}`,
       title: product.title || 'Product',
       price: price,
-      image_url: product.image_url || '',
-      description: product.description || '',
-      url: product.url || '',
+      image_url: imageUrl,
+      description,
+      url,
+      handle,
       variant_id: variantId
     };
   };

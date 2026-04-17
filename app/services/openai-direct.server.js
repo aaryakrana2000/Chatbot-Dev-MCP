@@ -55,7 +55,7 @@ export function createOpenAIDirectService() {
         streamHandlers.onProgress(progress);
       }
     };
-    const systemInstruction = getSystemPrompt(promptType, shopContext, cartId);
+    const systemInstruction = getSystemPrompt(promptType, shopContext, cartId, shopDomain);
     const inputMessages = formatMessagesForResponsesAPI(messages, systemInstruction, uploadedImage, productImage);
 
     // Check if we're generating an image (user uploaded image or product image present)
@@ -80,7 +80,7 @@ export function createOpenAIDirectService() {
 
     try {
       const response = await client.responses.create({
-        model: "gpt-5.2-2025-12-11",
+        model: "gpt-5.2-2025-12-11", 
         input: inputMessages,
         text: {
           format: {
@@ -426,7 +426,7 @@ export function createOpenAIDirectService() {
   /**
    * Gets the system prompt content with shop context
    */
-  const getSystemPrompt = (promptType, shopContext = null, cartId = null) => {
+  const getSystemPrompt = (promptType, shopContext = null, cartId = null, shopDomain = null) => {
     let basePrompt = systemPrompts.systemPrompts[promptType]?.content ||
       systemPrompts.systemPrompts[AppConfig.api.toolPromptType].content;
 
@@ -435,6 +435,16 @@ export function createOpenAIDirectService() {
       const shopInfo = `\n\n## STORE CONTEXT\nThis store specializes in: ${shopContext.description}\nWhen customers ask general questions like "what do you sell" or "what type of products are you selling", inform them about the store's specialty and then use the search_catalog tool to show actual products.\n`;
       basePrompt = basePrompt.replace('## YOUR ROLE', shopInfo + '## YOUR ROLE');
     }
+
+    // Product PDP links use stable handles — helps the chat widget parse /products/{handle} when falling back to text
+    if (shopDomain && typeof shopDomain === 'string' && shopDomain.startsWith('http')) {
+      const linkHint = `\n\n## PRODUCT LINKS (STABLE HANDLES)\nWhen you list products after search_catalog, include a storefront link per item using the product URL from tool results (path must be /products/{handle}). Example: [Same title as in tool](/products/example-product-handle) — $99. Relative paths /products/... are fine.\n\n## SEARCH_CATALOG ARGUMENT SAFETY\nWhen using search_catalog, do NOT add restrictive filters unless the user explicitly asked for them. In particular, never set price max/min to 0. If filters are not needed, omit filters entirely.\n`;
+      basePrompt = basePrompt.replace('## YOUR ROLE', linkHint + '## YOUR ROLE');
+    }
+
+    // Enforce strict gender/category separation for product recommendations.
+    const genderGuardrails = `\n\n## STRICT GENDER MATCHING\nIf the user asks for men's category/products, show ONLY men's products. Do NOT show women's products in that response.\nIf the user asks for women's category/products, show ONLY women's products. Do NOT show men's products in that response.\nIf no products are found for the requested gender/category, clearly say none were found and ask whether the user wants to switch category. Do not auto-switch unless the user explicitly asks to.\n`;
+    basePrompt = basePrompt.replace('## YOUR ROLE', genderGuardrails + '## YOUR ROLE');
 
     // Inject cart ID if available
     if (cartId) {
